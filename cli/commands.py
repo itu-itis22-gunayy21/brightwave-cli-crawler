@@ -57,7 +57,20 @@ def run_cli() -> None:
             crawler.stop()
             storage.clear()
             print("Saved state cleared.")
-            break
+
+            # Reinitialize system after clearing state
+            storage = Storage("data/state.json")
+            crawler = CrawlManager(
+                storage=storage,
+                worker_count=3,
+                queue_capacity=500,
+                requests_per_second=2.0,
+                timeout_seconds=8.0,
+            )
+            search_engine = SearchEngine(storage)
+
+            crawler.start()
+            continue
 
         if raw == "exit":
             crawler.stop()
