@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 class Storage:
     def __init__(self, state_path: str = "data/state.json") -> None:
         self.state_path = state_path
+        self.storage_dir = "data/storage"
         self.lock = threading.RLock()
 
         self.visited_urls: set[str] = set()
@@ -17,13 +18,15 @@ class Storage:
         self.body_index: dict[str, dict[str, int]] = defaultdict(dict)
         self.title_index: dict[str, dict[str, int]] = defaultdict(dict)
 
-        self._ensure_data_dir()
+        self._ensure_dirs()
         self._load_state()
+        self._rebuild_storage_files()
 
-    def _ensure_data_dir(self) -> None:
-        directory = os.path.dirname(self.state_path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
+    def _ensure_dirs(self) -> None:
+        state_dir = os.path.dirname(self.state_path)
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+        os.makedirs(self.storage_dir, exist_ok=True)
 
     def _load_state(self) -> None:
         if not os.path.exists(self.state_path):
@@ -103,6 +106,40 @@ class Storage:
             for token, count in title_counts.items():
                 self.title_index[token][url] = count
 
+            self._rebuild_storage_files()
+
+    def _word_file_name(self, token: str) -> str:
+        first = token[0].lower()
+        if not first.isalpha():
+            first = "other"
+        return os.path.join(self.storage_dir, f"{first}.data")
+
+    def _rebuild_storage_files(self) -> None:
+        for name in os.listdir(self.storage_dir):
+            if name.endswith(".data"):
+                try:
+                    os.remove(os.path.join(self.storage_dir, name))
+                except OSError:
+                    pass
+
+        file_lines: dict[str, list[str]] = defaultdict(list)
+
+        for page in self.pages.values():
+            combined_counts = Counter(page.get("body_counts", {}))
+            combined_counts.update(page.get("title_counts", {}))
+
+            for token, frequency in combined_counts.items():
+                line = (
+                    f"{token} {page['url']} {page['origin_url']} "
+                    f"{page['depth']} {frequency}"
+                )
+                file_lines[self._word_file_name(token)].append(line)
+
+        for filename, lines in file_lines.items():
+            with open(filename, "w", encoding="utf-8") as handle:
+                for line in sorted(lines):
+                    handle.write(line + "\n")
+
     def get_page_count(self) -> int:
         with self.lock:
             return len(self.pages)
@@ -139,3 +176,10 @@ class Storage:
 
         if os.path.exists(self.state_path):
             os.remove(self.state_path)
+
+        for name in os.listdir(self.storage_dir):
+            if name.endswith(".data"):
+                try:
+                    os.remove(os.path.join(self.storage_dir, name))
+                except OSError:
+                    pass
