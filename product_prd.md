@@ -1,15 +1,9 @@
 
 
-
-
-
-
-
-
-
 # Product Requirement Document
 
 ## Product Name
+
 Brightwave Web Crawler and Search System
 
 ---
@@ -18,7 +12,9 @@ Brightwave Web Crawler and Search System
 
 The Brightwave Web Crawler is a single-machine web crawling and search system designed to crawl web pages starting from a seed URL, index the content of discovered pages, and allow users to perform searches on indexed content while crawling is still in progress.
 
-The system focuses on concurrency, load management through back pressure, duplicate prevention, and system visibility through a command-line interface and a local search API. The project demonstrates architectural sensibility, concurrent processing, indexing, and basic search engine ranking logic.
+The system focuses on concurrency, load management through back pressure, duplicate prevention, persistence, and system visibility through a command-line interface and a local search API. The project demonstrates architectural sensibility, concurrent processing, indexing, and basic search engine ranking logic.
+
+The system is designed to run locally on a single machine and persist indexed data so that the crawler can resume after interruption.
 
 ---
 
@@ -28,12 +24,13 @@ The goal of this project is to build a web crawler that can recursively crawl we
 
 The system must:
 
-- Ensure that pages are not crawled more than once.
-- Manage its workload to prevent overload.
-- Allow search functionality while indexing is still ongoing.
-- Provide visibility into crawler progress and system status.
-- Export indexed data into raw storage files.
-- Provide a local API to search indexed data and calculate relevance scores.
+* Ensure that pages are not crawled more than once.
+* Manage its workload to prevent overload.
+* Allow search functionality while indexing is still ongoing.
+* Provide visibility into crawler progress and system status.
+* Export indexed data into raw storage files.
+* Provide a local API to search indexed data and calculate relevance scores.
+* Persist indexed data so that the system can resume after restart.
 
 ---
 
@@ -41,17 +38,18 @@ The system must:
 
 The main goals of the system are:
 
-- Crawl web pages recursively up to a specified depth.
-- Prevent duplicate page crawling using a visited URL tracking system.
-- Provide search functionality over indexed pages.
-- Allow search queries while the crawler is still indexing new pages.
-- Manage crawler workload using back pressure mechanisms.
-- Provide system visibility through a CLI dashboard.
-- Export indexed words into raw storage files.
-- Provide a local HTTP search API.
-- Calculate relevance scores for search results.
-- Support basic persistence so the crawler can resume after interruption.
-- Maintain a modular and clean system architecture.
+* Crawl web pages recursively up to a specified depth.
+* Prevent duplicate page crawling using a visited URL tracking system.
+* Provide search functionality over indexed pages.
+* Allow search queries while the crawler is still indexing new pages.
+* Manage crawler workload using back pressure mechanisms.
+* Provide system visibility through a CLI dashboard.
+* Export indexed words into raw storage files.
+* Provide a local HTTP search API.
+* Calculate relevance scores for search results.
+* Support persistence so the crawler can resume after interruption.
+* Maintain a modular and clean system architecture.
+* Store indexed data in a local database.
 
 ---
 
@@ -59,11 +57,11 @@ The main goals of the system are:
 
 The following features are intentionally out of scope for this project:
 
-- Distributed crawling across multiple machines.
-- JavaScript rendering or dynamic content execution.
-- Advanced search ranking algorithms such as PageRank.
-- Full production-scale search engine infrastructure.
-- Large-scale distributed storage systems.
+* Distributed crawling across multiple machines.
+* JavaScript rendering or dynamic content execution.
+* Advanced search ranking algorithms such as PageRank.
+* Full production-scale search engine infrastructure.
+* Large-scale distributed storage systems.
 
 ---
 
@@ -73,14 +71,15 @@ The following features are intentionally out of scope for this project:
 
 The crawler is responsible for:
 
-- Fetching web pages from URLs.
-- Parsing HTML content.
-- Extracting links and text content.
-- Adding new URLs to the crawl queue.
-- Respecting crawl depth limits.
-- Preventing duplicate crawling.
-- Updating the search index and metadata storage.
-- Exporting indexed words into storage files.
+* Fetching web pages from URLs.
+* Parsing HTML content.
+* Extracting links and text content.
+* Adding new URLs to the crawl queue.
+* Respecting crawl depth limits.
+* Preventing duplicate crawling.
+* Updating the search index and metadata storage.
+* Exporting indexed words into storage files.
+* Storing crawled data into a local database.
 
 ---
 
@@ -88,16 +87,12 @@ The crawler is responsible for:
 
 The search engine is responsible for:
 
-- Processing user queries.
-- Searching indexed content using an inverted index.
-- Ranking results based on keyword frequency and depth.
-- Returning results in the format:
-
-```
+* Processing user queries.
+* Searching indexed content using an inverted index.
+* Ranking results based on keyword frequency and depth.
+* Returning results in the format:
 
 (relevant_url, origin_url, depth)
-
-```
 
 Search must work while the crawler is still indexing pages.
 
@@ -107,8 +102,6 @@ Search must work while the crawler is still indexing pages.
 
 The CLI interface allows users to interact with the system using commands:
 
-```
-
 index <url> <depth>
 search <query>
 status
@@ -116,23 +109,17 @@ clear
 help
 exit
 
-```
-
 The CLI also provides system visibility such as indexing progress, queue size, and crawler status.
 
 ---
 
 ### 5.4 Search API
 
-The system also exposes a local HTTP API that allows searching indexed data.
+The system exposes a local HTTP API that allows searching indexed data.
 
 Example endpoint:
 
-```
-
 GET [http://localhost:3600/search?query=python&sortBy=relevance](http://localhost:3600/search?query=python&sortBy=relevance)
-
-```
 
 The API returns search results including relevance scores.
 
@@ -142,12 +129,12 @@ The API returns search results including relevance scores.
 
 The system follows a modular architecture with the following modules:
 
-- **CLI Module**: Handles user commands and displays system status.
-- **Crawler Module**: Manages the crawl queue, worker threads, and crawl logic.
-- **Parser Module**: Extracts text and links from HTML pages.
-- **Storage Module**: Stores visited URLs, indexed content, metadata, and raw storage files.
-- **Search Module**: Handles search queries and ranking.
-- **API Module**: Provides HTTP search interface and relevance scoring.
+* CLI Module
+* Crawler Module
+* Parser Module
+* Storage Module
+* Search Module
+* API Module
 
 This modular architecture separates responsibilities and improves maintainability and scalability.
 
@@ -155,32 +142,30 @@ This modular architecture separates responsibilities and improves maintainabilit
 
 ## 7. Data Storage
 
-The system uses a hybrid storage approach:
+The system uses persistent storage to store crawled data.
 
-### In-Memory Storage
-Used for fast indexing and search operations:
-- Visited URLs
-- Indexed pages
-- Inverted index
-- Metadata
-- Crawl queue snapshot
+### Database Storage
+
+The system stores:
+
+* Visited URLs
+* Page metadata
+* Indexed tokens
+* Word frequencies
+* Crawl depth
+* Origin URL
+
+This allows the crawler to resume after interruption and keeps indexed data between program runs.
 
 ### Raw Storage Files
-Indexed words are exported into files located in:
 
-```
+Indexed words are exported into files located in:
 
 data/storage/
 
-```
-
 Each line in the storage files follows the format:
 
-```
-
 word relevant_url origin_url depth frequency
-
-```
 
 These files allow manual inspection of indexed data and are used by the search API.
 
@@ -190,13 +175,13 @@ These files allow manual inspection of indexed data and are used by the search A
 
 The system uses the following data structures:
 
-- **Queue**: Stores URLs waiting to be crawled (frontier).
-- **Visited Set**: Tracks URLs that have already been crawled.
-- **Queued Set**: Tracks URLs already scheduled for crawling.
-- **Inverted Index**: Maps words to URLs where they appear.
-- **Metadata Store**: Maps each URL to its origin URL and crawl depth.
-- **Worker Threads**: Process crawl tasks concurrently.
-- **Raw Storage Files**: Store indexed word entries for API search.
+* Queue for URLs waiting to be crawled
+* Visited URL set
+* Queued URL set
+* Inverted index (word → URLs)
+* Metadata storage (URL → origin, depth)
+* Worker thread pool
+* Raw storage files for indexed words
 
 ---
 
@@ -218,14 +203,14 @@ This prevents uncontrolled memory growth and excessive crawling load and ensures
 
 ## 11. System Visibility
 
-The system provides visibility through the CLI **status** command. The following metrics are displayed:
+The system provides visibility through the CLI status command. The following metrics are displayed:
 
-- Current indexing progress
-- Number of indexed pages
-- Queue size
-- Worker activity
-- Back pressure status
-- Success and failure counts
+* Number of indexed pages
+* Queue size
+* Worker activity
+* Back pressure status
+* Success and failure counts
+* Crawler active status
 
 This allows users to monitor crawler behavior in real time.
 
@@ -235,16 +220,13 @@ This allows users to monitor crawler behavior in real time.
 
 Search results returned by the API include a relevance score calculated using the following formula:
 
-```
-
 score = (frequency × 10) + 1000 − (depth × 5)
 
-```
-
 Where:
-- **frequency** is how many times the word appears on the page.
-- **depth** is the crawl depth where the page was found.
-- Exact word matches receive a bonus score.
+
+* frequency is how many times the word appears on the page.
+* depth is the crawl depth where the page was found.
+* Exact word matches receive a bonus score.
 
 This scoring system prioritizes pages where the word appears frequently and pages closer to the origin URL.
 
@@ -254,40 +236,45 @@ This scoring system prioritizes pages where the word appears frequently and page
 
 Search results are returned in the following format:
 
-```
-
 (relevant_url, origin_url, depth)
 
-```
-
 API results also include:
-- frequency
-- relevance_score
+
+* frequency
+* relevance_score
 
 ---
 
-## 14. Future Improvements
+## 14. Persistence and Resume
+
+The system stores crawled data and indexed tokens in persistent storage so that if the program is stopped and restarted, previously indexed data is still available and search results can still be returned without re-crawling the entire web.
+
+This feature improves system reliability and scalability.
+
+---
+
+## 15. Future Improvements
 
 The system can be extended in the future by:
 
-- Using a database for persistent storage.
-- Implementing distributed crawling across multiple machines.
-- Adding advanced search ranking algorithms.
-- Implementing recrawl scheduling.
-- Adding a web-based dashboard instead of CLI.
-- Implementing fuzzy search and spell correction.
-- Adding caching and incremental indexing.
+* Implementing distributed crawling
+* Using advanced ranking algorithms
+* Implementing PageRank
+* Adding recrawl scheduling
+* Adding a web-based dashboard
+* Implementing fuzzy search
+* Adding caching and incremental indexing
+* Scaling the system for production environments
 
 ---
 
-## 15. Notes
+## 16. Notes
 
-- The system is designed to run on a single machine.
-- Search works while indexing is still running.
-- The system demonstrates concurrency, back pressure, and search indexing.
-- Raw storage files allow verification of indexed data.
-- The architecture can be extended to a production-scale crawler.
-```
+* The system is designed to run on a single machine.
+* Search works while indexing is still running.
+* The system demonstrates concurrency, back pressure, indexing, and search architecture.
+* Raw storage files allow verification of indexed data.
+* The architecture can be extended to a production-scale crawler.
 
 ---
 

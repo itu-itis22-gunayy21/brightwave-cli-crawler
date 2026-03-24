@@ -9,14 +9,14 @@ Commands
 index <url> <depth>     Start indexing from a seed URL
 search <query>          Search indexed pages
 status                  Show current system state
-clear                   Clear saved state and indexed data
+clear                   Clear saved database state
 help                    Show help
 exit                    Save and quit
 """.strip()
 
 
 def run_cli() -> None:
-    storage = Storage("data/state.json")
+    storage = Storage("data/crawler.db")
     crawler = CrawlManager(
         storage=storage,
         worker_count=3,
@@ -49,16 +49,26 @@ def run_cli() -> None:
         if raw == "status":
             snapshot = crawler.status()
             print("\nSystem status")
-            for key, value in snapshot.items():
-                print(f"  {key}: {value}")
+            print("----------------------------------------")
+            print(f"Indexed pages   : {snapshot['indexed_pages']}")
+            print(f"Visited URLs    : {snapshot['visited_urls']}")
+            print(f"Queue size      : {snapshot['queue_size']}")
+            print(f"Active workers  : {snapshot['active_workers']}/{snapshot['worker_count']}")
+            print(f"Back pressure   : {snapshot['back_pressure_on']}")
+            print(f"Success count   : {snapshot['success_count']}")
+            print(f"Failure count   : {snapshot['failure_count']}")
+            print(f"Crawler active  : {snapshot['crawler_active']}")
+            if snapshot["last_error"]:
+                print(f"Last error      : {snapshot['last_error']}")
+            print("----------------------------------------")
             continue
 
         if raw == "clear":
             crawler.stop()
             storage.clear()
-            print("Saved state cleared.")
+            print("Saved database state cleared.")
 
-            storage = Storage("data/state.json")
+            storage = Storage("data/crawler.db")
             crawler = CrawlManager(
                 storage=storage,
                 worker_count=3,

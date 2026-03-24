@@ -1,13 +1,14 @@
 import queue
 import threading
 import time
-from dataclasses import dataclass, asdict
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from dataclasses import dataclass
+
 import requests
+import urllib3
 
 from core.parser import parse_html, tokenize
-from core.storage import Storage
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 @dataclass(frozen=True)
@@ -21,128 +22,132 @@ class CrawlTask:
 class CrawlManager:
     def __init__(
         self,
-        storage: Storage,
+        storage,
         worker_count: int = 3,
         queue_capacity: int = 500,
         requests_per_second: float = 2.0,
         timeout_seconds: float = 8.0,
-    ) -> None:
+    ):
         self.storage = storage
         self.worker_count = worker_count
+        self.queue_capacity = queue_capacity
+        self.requests_per_second = requests_per_second
         self.timeout_seconds = timeout_seconds
-        self.request_interval = 1.0 / requests_per_second if requests_per_second > 0 else 0.0
 
-        self.frontier: queue.Queue[CrawlTask] = queue.Queue(maxsize=queue_capacity)
-        self.workers: list[threading.Thread] = []
+        self.frontier = queue.Queue(maxsize=queue_capacity)
         self.stop_event = threading.Event()
-        self.state_lock = threading.RLock()
+        self.threads: list[threading.Thread] = []
 
-        self.started = False
         self.active_workers = 0
         self.success_count = 0
         self.failure_count = 0
         self.last_error = ""
-        self.last_request_at = 0.0
 
-        self._restore_frontier()
+        self.rate_delay = 1.0 / max(0.1, requests_per_second)
+        self.lock = threading.RLock()
 
-    def _restore_frontier(self) -> None:
+    def start(self):
+        self.stop_event.clear()
+
+        # Resume frontier if exists
         for item in self.storage.frontier_snapshot:
+            task = CrawlTask(
+                item["url"],
+                item["origin_url"],
+                item["depth"],
+                item["max_depth"],
+            )
             try:
-                task = CrawlTask(**item)
                 self.frontier.put_nowait(task)
                 self.storage.mark_queued(task.url)
-            except Exception:
-                continue
+            except queue.Full:
+                break
 
-    def start(self) -> None:
-        with self.state_lock:
-            if self.started:
-                return
-            self.started = True
+        self.threads = []
+        for _ in range(self.worker_count):
+            t = threading.Thread(target=self.worker_loop, daemon=True)
+            t.start()
+            self.threads.append(t)
 
-            for index in range(self.worker_count):
-                thread = threading.Thread(
-                    target=self._worker_loop,
-                    name=f"crawl-worker-{index}",
-                    daemon=True,
-                )
-                self.workers.append(thread)
-                thread.start()
-
-    def stop(self) -> None:
+    def stop(self):
         self.stop_event.set()
-        for thread in self.workers:
-            thread.join(timeout=1.0)
-        self._persist_snapshot()
 
-    def submit(self, origin_url: str, max_depth: int) -> bool:
-        task = CrawlTask(
-            url=origin_url.strip(),
-            origin_url=origin_url.strip(),
-            depth=0,
-            max_depth=max_depth,
-        )
-        return self._enqueue(task)
+        # Save frontier snapshot for resume
+        snapshot = []
+        while not self.frontier.empty():
+            try:
+                task = self.frontier.get_nowait()
+            except queue.Empty:
+                break
 
-    def _enqueue(self, task: CrawlTask) -> bool:
-        if not task.url:
+            snapshot.append(
+                {
+                    "url": task.url,
+                    "origin_url": task.origin_url,
+                    "depth": task.depth,
+                    "max_depth": task.max_depth,
+                }
+            )
+
+        self.storage.save_frontier_snapshot(snapshot)
+
+        for t in self.threads:
+            t.join(timeout=1.0)
+
+    def submit(self, url: str, max_depth: int) -> bool:
+        if self.storage.is_seen_or_queued(url):
             return False
 
-        if self.storage.is_seen_or_queued(task.url):
-            return False
+        task = CrawlTask(url, url, 0, max_depth)
 
         try:
-            self.frontier.put(task, timeout=0.3)
+            self.frontier.put_nowait(task)
+            self.storage.mark_queued(url)
+            return True
         except queue.Full:
             return False
 
-        self.storage.mark_queued(task.url)
-        self._persist_snapshot()
-        return True
-
-    def _worker_loop(self) -> None:
+    def worker_loop(self):
         while not self.stop_event.is_set():
             try:
                 task = self.frontier.get(timeout=0.5)
             except queue.Empty:
                 continue
 
-            with self.state_lock:
+            with self.lock:
                 self.active_workers += 1
 
-            self.storage.unmark_queued(task.url)
-
             try:
-                self._process_task(task)
+                processed = self.process_task(task)
+                if processed:
+                    with self.lock:
+                        self.success_count += 1
+            except Exception as e:
+                with self.lock:
+                    self.failure_count += 1
+                    self.last_error = str(e)
             finally:
-                with self.state_lock:
+                self.storage.unmark_queued(task.url)
+                with self.lock:
                     self.active_workers -= 1
                 self.frontier.task_done()
-                self._persist_snapshot()
 
-    def _respect_rate_limit(self) -> None:
-        if self.request_interval <= 0:
-            return
+            time.sleep(self.rate_delay)
 
-        with self.state_lock:
-            now = time.time()
-            elapsed = now - self.last_request_at
-            if elapsed < self.request_interval:
-                time.sleep(self.request_interval - elapsed)
-            self.last_request_at = time.time()
+    def process_task(self, task: CrawlTask) -> bool:
+        if self.storage.has_visited(task.url):
+            return False
 
-    def _process_task(self, task: CrawlTask) -> None:
-        if self.storage.is_seen_or_queued(task.url) and task.url in self.storage.visited_urls:
-            return
-
-        self.storage.mark_visited(task.url)
-
-        html = self._fetch(task.url)
-        if html is None:
-            with self.state_lock:
-                self.failure_count += 1
-            return
+        try:
+            response = requests.get(
+                task.url,
+                timeout=self.timeout_seconds,
+                headers={"User-Agent": "BrightwaveCLI/1.0"},
+                verify=False,
+            )
+            html = response.text
+        except Exception as e:
+            raise Exception(f"Request failed for {task.url}: {e}")
 
         title, body, links = parse_html(html, task.url)
         body_tokens = tokenize(body)
@@ -158,66 +163,38 @@ class CrawlManager:
             title_tokens=title_tokens,
         )
 
+        self.storage.mark_visited(task.url)
+
         if task.depth < task.max_depth:
             for link in links:
-                child = CrawlTask(
-                    url=link,
-                    origin_url=task.origin_url,
-                    depth=task.depth + 1,
-                    max_depth=task.max_depth,
+                if self.storage.is_seen_or_queued(link):
+                    continue
+
+                new_task = CrawlTask(
+                    link,
+                    task.origin_url,
+                    task.depth + 1,
+                    task.max_depth,
                 )
-                self._enqueue(child)
 
-        with self.state_lock:
-            self.success_count += 1
+                try:
+                    self.frontier.put_nowait(new_task)
+                    self.storage.mark_queued(link)
+                except queue.Full:
+                    break
 
-    def _fetch(self, url: str) -> str | None:
-        self._respect_rate_limit()
-
-        try:
-            response = requests.get(
-                url,
-                headers={"User-Agent": "BrightwaveCLI/1.0"},
-                timeout=self.timeout_seconds,
-                verify=False
-            )
-            if response.status_code != 200:
-                self.last_error = f"HTTP {response.status_code} for {url}"
-                return None
-
-            content_type = response.headers.get("Content-Type", "")
-            if "text/html" not in content_type:
-                self.last_error = f"Skipped non-HTML content at {url}"
-                return None
-
-            response.encoding = response.encoding or "utf-8"
-            return response.text
-
-        except requests.RequestException as exc:
-            self.last_error = f"Request failed for {url}: {exc}"
-            return None
-
-    def _persist_snapshot(self) -> None:
-        items: list[dict] = []
-
-        with self.frontier.mutex:
-            for task in list(self.frontier.queue):
-                items.append(asdict(task))
-
-        self.storage.frontier_snapshot = items
-        self.storage.save_state(items)
+        return True
 
     def status(self) -> dict:
-        with self.state_lock:
-            return {
-                "queue_size": self.frontier.qsize(),
-                "indexed_pages": self.storage.get_page_count(),
-                "active_workers": self.active_workers,
-                "crawler_active": self.active_workers > 0 or not self.frontier.empty(),
-                "back_pressure_on": self.frontier.full(),
-                "visited_urls": len(self.storage.visited_urls),
-                "success_count": self.success_count,
-                "failure_count": self.failure_count,
-                "last_error": self.last_error,
-                "worker_count": self.worker_count,
-            }
+        return {
+            "queue_size": self.frontier.qsize(),
+            "indexed_pages": self.storage.get_page_count(),
+            "active_workers": self.active_workers,
+            "crawler_active": self.active_workers > 0 or not self.frontier.empty(),
+            "back_pressure_on": self.frontier.full(),
+            "visited_urls": self.storage.get_visited_count(),
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "last_error": self.last_error,
+            "worker_count": self.worker_count,
+        }

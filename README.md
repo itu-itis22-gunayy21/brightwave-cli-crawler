@@ -1,25 +1,29 @@
 
-
-
-
-
-
-
 # Brightwave CLI Web Crawler
 
-This project implements a single-machine concurrent web crawler with back pressure and live search during indexing as part of the Brightwave "Build Google in an Afternoon" assignment.
+This project implements a single-machine concurrent web crawler with back pressure, persistent storage, and live search during indexing as part of the Brightwave "Build Google in an Afternoon" assignment.
 
-A single-machine web crawler and live search system built for the “Build Google in an Afternoon” style assignment. The project focuses on clean architecture, concurrency, back pressure, and the ability to search indexed content while crawling is still in progress.
+The system includes a crawler (indexer), parser, storage layer, inverted index, search engine, raw storage export, and a local HTTP search API with relevance scoring.
 
 ---
 
 ## Overview
 
-This project implements a simplified search engine pipeline including a crawler (indexer), parser, storage layer, inverted index, and search engine. The system runs locally on a single machine and is controlled through a CLI interface.
+This project implements a simplified search engine pipeline including:
+
+- Web crawler (indexer)
+- HTML parser
+- SQLite storage layer
+- Inverted index
+- Search engine
+- Raw storage export files
+- Local HTTP search API
+- CLI interface
+- Persistence and resume functionality
 
 The crawler recursively visits web pages starting from an origin URL, extracts text and links, indexes the content, and allows users to perform search queries while indexing is still ongoing.
 
-In addition to the CLI search engine, the system also exports indexed data into raw storage files and exposes a local HTTP search API that calculates relevance scores.
+All indexed data is stored in a local SQLite database so the system can resume after interruption without losing previously crawled data.
 
 ---
 
@@ -31,10 +35,10 @@ In addition to the CLI search engine, the system also exports indexed data into 
 * Search indexed content while crawling is still running
 * Bounded queue for back pressure
 * Multi-threaded crawler workers
-* In-memory inverted index for search
+* SQLite database for persistent storage
 * Raw storage export files (`data/storage/*.data`)
 * Local search API with relevance scoring
-* Basic persistence for resume after interruption
+* Persistence and resume after program restart
 * CLI commands for indexing, searching, and status tracking
 * System status monitoring (queue size, indexed pages, worker status)
 
@@ -54,6 +58,7 @@ crawler-project/
 ├── app/
 │   └── main.py          # HTTP search API
 ├── data/
+│   ├── crawler.db       # SQLite database
 │   └── storage/
 │       ├── a.data
 │       ├── b.data
@@ -90,7 +95,7 @@ python main.py
 index <url> <depth>     Start indexing from a seed URL
 search <query>          Search indexed pages
 status                  Show current system state
-clear                   Clear saved state and indexed data
+clear                   Clear saved database state
 help                    Show help
 exit                    Save and quit
 ```
@@ -127,7 +132,7 @@ Each line in a storage file has the format:
 word relevant_url origin_url depth frequency
 ```
 
-Example line:
+Example:
 
 ```text
 python https://www.python.org https://www.python.org 0 5
@@ -172,9 +177,17 @@ score = (frequency × 10) + 1000 − (depth × 5)
 
 ---
 
+## Persistence and Resume
+
+The crawler uses a local SQLite database to persist indexed pages, visited URLs, word frequencies, and metadata.
+
+This allows the system to resume after interruption without restarting the crawl from scratch. If the program is stopped and started again, previously indexed data remains available for search queries.
+
+---
+
 ## Architecture Summary
 
-The system consists of a multi-threaded crawler with a bounded frontier queue, an in-memory storage layer, and an inverted index used by the search engine. Worker threads fetch and parse pages concurrently while the storage layer maintains visited URLs, indexed content, and metadata.
+The system consists of a multi-threaded crawler with a bounded frontier queue, a SQLite storage layer, and an inverted index used by the search engine. Worker threads fetch and parse pages concurrently while the storage layer maintains visited URLs, indexed content, and metadata.
 
 Search queries run on the inverted index and can return results while indexing is still in progress. Indexed data is also exported into raw storage files for transparency and API-based relevance scoring.
 
@@ -188,23 +201,26 @@ Back pressure is implemented using a bounded queue to prevent uncontrolled growt
 * Implemented an inverted index for fast search.
 * Designed a multi-threaded crawler for concurrency.
 * Allowed search while indexing is still running.
+* Used SQLite database for persistence.
 * Exported indexed data into raw storage files.
 * Implemented a local HTTP API for relevance-based search.
-* Used modular architecture separating crawler, parser, storage, and search.
-* Designed for single-machine execution.
+* Designed modular architecture separating crawler, parser, storage, and search.
+* Designed for single-machine execution with persistent storage.
 
 ---
 
 ## Future Improvements
 
-* Replace in-memory storage with a database.
-* Implement distributed crawling.
-* Add more advanced ranking algorithms.
-* Add a web-based dashboard instead of CLI.
-* Implement recrawl scheduling and freshness tracking.
-* Add caching and incremental indexing.
+* Distributed crawling across multiple machines.
+* More advanced ranking algorithms (TF-IDF, PageRank).
+* Web dashboard instead of CLI.
+* Recrawl scheduling and freshness tracking.
+* Incremental indexing.
+* Caching and performance optimizations.
 
 ````
 
 ---
+
+
 

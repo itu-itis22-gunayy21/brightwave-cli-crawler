@@ -1,64 +1,67 @@
-import json
 import os
+import sqlite3
 import threading
 from collections import Counter, defaultdict
 
 
 class Storage:
-    def __init__(self, state_path: str = "data/state.json") -> None:
-        self.state_path = state_path
+    def __init__(self, db_path: str = "data/crawler.db") -> None:
+        self.db_path = db_path
         self.storage_dir = "data/storage"
         self.lock = threading.RLock()
-
-        self.visited_urls: set[str] = set()
         self.queued_urls: set[str] = set()
         self.frontier_snapshot: list[dict] = []
 
-        self.pages: dict[str, dict] = {}
-        self.body_index: dict[str, dict[str, int]] = defaultdict(dict)
-        self.title_index: dict[str, dict[str, int]] = defaultdict(dict)
-
         self._ensure_dirs()
-        self._load_state()
+        self._init_db()
+        self.frontier_snapshot = self.load_frontier_snapshot()
         self._rebuild_storage_files()
 
     def _ensure_dirs(self) -> None:
-        state_dir = os.path.dirname(self.state_path)
-        if state_dir:
-            os.makedirs(state_dir, exist_ok=True)
+        db_dir = os.path.dirname(self.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
         os.makedirs(self.storage_dir, exist_ok=True)
 
-    def _load_state(self) -> None:
-        if not os.path.exists(self.state_path):
-            return
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        return conn
 
-        try:
-            with open(self.state_path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except Exception:
-            return
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS visited_urls (
+                    url TEXT PRIMARY KEY
+                );
 
-        with self.lock:
-            self.visited_urls = set(data.get("visited_urls", []))
-            self.pages = data.get("pages", {})
-            self.frontier_snapshot = data.get("frontier", [])
+                CREATE TABLE IF NOT EXISTS pages (
+                    url TEXT PRIMARY KEY,
+                    origin_url TEXT NOT NULL,
+                    depth INTEGER NOT NULL,
+                    title TEXT,
+                    body TEXT
+                );
 
-            for url, page_data in self.pages.items():
-                for token, count in page_data.get("body_counts", {}).items():
-                    self.body_index[token][url] = count
-                for token, count in page_data.get("title_counts", {}).items():
-                    self.title_index[token][url] = count
+                CREATE TABLE IF NOT EXISTS tokens (
+                    term TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    is_title INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (term, url, is_title),
+                    FOREIGN KEY (url) REFERENCES pages(url)
+                );
 
-    def save_state(self, frontier_items: list[dict]) -> None:
-        with self.lock:
-            payload = {
-                "visited_urls": sorted(self.visited_urls),
-                "pages": self.pages,
-                "frontier": frontier_items,
-            }
-
-        with open(self.state_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+                CREATE TABLE IF NOT EXISTS frontier (
+                    url TEXT PRIMARY KEY,
+                    origin_url TEXT NOT NULL,
+                    depth INTEGER NOT NULL,
+                    max_depth INTEGER NOT NULL
+                );
+                """
+            )
 
     def mark_queued(self, url: str) -> None:
         with self.lock:
@@ -68,13 +71,26 @@ class Storage:
         with self.lock:
             self.queued_urls.discard(url)
 
+    def has_visited(self, url: str) -> bool:
+        with self.lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM visited_urls WHERE url = ? LIMIT 1",
+                (url,),
+            ).fetchone()
+            return row is not None
+
     def is_seen_or_queued(self, url: str) -> bool:
         with self.lock:
-            return url in self.visited_urls or url in self.queued_urls
+            if url in self.queued_urls:
+                return True
+        return self.has_visited(url)
 
     def mark_visited(self, url: str) -> None:
-        with self.lock:
-            self.visited_urls.add(url)
+        with self.lock, self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO visited_urls(url) VALUES (?)",
+                (url,),
+            )
 
     def store_page(
         self,
@@ -89,24 +105,36 @@ class Storage:
         body_counts = dict(Counter(body_tokens))
         title_counts = dict(Counter(title_tokens))
 
-        with self.lock:
-            self.pages[url] = {
-                "url": url,
-                "origin_url": origin_url,
-                "depth": depth,
-                "title": title,
-                "body": body,
-                "body_counts": body_counts,
-                "title_counts": title_counts,
-            }
+        with self.lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO pages(url, origin_url, depth, title, body)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (url, origin_url, depth, title, body),
+            )
 
-            for token, count in body_counts.items():
-                self.body_index[token][url] = count
+            conn.execute("DELETE FROM tokens WHERE url = ?", (url,))
 
-            for token, count in title_counts.items():
-                self.title_index[token][url] = count
+            for term, count in body_counts.items():
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO tokens(term, url, count, is_title)
+                    VALUES (?, ?, ?, 0)
+                    """,
+                    (term, url, count),
+                )
 
-            self._rebuild_storage_files()
+            for term, count in title_counts.items():
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO tokens(term, url, count, is_title)
+                    VALUES (?, ?, ?, 1)
+                    """,
+                    (term, url, count),
+                )
+
+        self._rebuild_storage_files()
 
     def _word_file_name(self, token: str) -> str:
         first = token[0].lower()
@@ -124,16 +152,19 @@ class Storage:
 
         file_lines: dict[str, list[str]] = defaultdict(list)
 
-        for page in self.pages.values():
-            combined_counts = Counter(page.get("body_counts", {}))
-            combined_counts.update(page.get("title_counts", {}))
+        with self.lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.term, p.url, p.origin_url, p.depth, SUM(t.count) as total_frequency
+                FROM tokens t
+                JOIN pages p ON t.url = p.url
+                GROUP BY t.term, p.url, p.origin_url, p.depth
+                """
+            ).fetchall()
 
-            for token, frequency in combined_counts.items():
-                line = (
-                    f"{token} {page['url']} {page['origin_url']} "
-                    f"{page['depth']} {frequency}"
-                )
-                file_lines[self._word_file_name(token)].append(line)
+        for term, url, origin_url, depth, frequency in rows:
+            line = f"{term} {url} {origin_url} {depth} {frequency}"
+            file_lines[self._word_file_name(term)].append(line)
 
         for filename, lines in file_lines.items():
             with open(filename, "w", encoding="utf-8") as handle:
@@ -141,41 +172,86 @@ class Storage:
                     handle.write(line + "\n")
 
     def get_page_count(self) -> int:
-        with self.lock:
-            return len(self.pages)
+        with self.lock, self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM pages").fetchone()
+            return int(row[0])
+
+    def get_visited_count(self) -> int:
+        with self.lock, self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) FROM visited_urls").fetchone()
+            return int(row[0])
 
     def get_result_metadata(self, url: str) -> tuple[str, int] | None:
-        with self.lock:
-            page = self.pages.get(url)
-            if not page:
-                return None
-            return page["origin_url"], page["depth"]
+        with self.lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT origin_url, depth FROM pages WHERE url = ?",
+                (url,),
+            ).fetchone()
+            return row if row else None
 
     def search(self, tokens: list[str]) -> list[tuple[str, float]]:
         scores: dict[str, float] = defaultdict(float)
 
-        with self.lock:
-            for token in tokens:
-                for url, count in self.body_index.get(token, {}).items():
-                    scores[url] += float(count)
+        with self.lock, self._connect() as conn:
+            for term in tokens:
+                rows = conn.execute(
+                    "SELECT url, count, is_title FROM tokens WHERE term = ?",
+                    (term,),
+                ).fetchall()
 
-                for url, count in self.title_index.get(token, {}).items():
-                    scores[url] += float(count) * 3.0
+                for url, count, is_title in rows:
+                    if is_title:
+                        scores[url] += float(count) * 3.0
+                    else:
+                        scores[url] += float(count)
 
         ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
         return ranked
 
+    def load_frontier_snapshot(self) -> list[dict]:
+        with self.lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT url, origin_url, depth, max_depth FROM frontier"
+            ).fetchall()
+
+        return [
+            {
+                "url": url,
+                "origin_url": origin_url,
+                "depth": depth,
+                "max_depth": max_depth,
+            }
+            for url, origin_url, depth, max_depth in rows
+        ]
+
+    def save_frontier_snapshot(self, frontier_items: list[dict]) -> None:
+        with self.lock, self._connect() as conn:
+            conn.execute("DELETE FROM frontier")
+
+            for item in frontier_items:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO frontier(url, origin_url, depth, max_depth)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        item["url"],
+                        item["origin_url"],
+                        item["depth"],
+                        item["max_depth"],
+                    ),
+                )
+
     def clear(self) -> None:
         with self.lock:
-            self.visited_urls.clear()
             self.queued_urls.clear()
             self.frontier_snapshot.clear()
-            self.pages.clear()
-            self.body_index.clear()
-            self.title_index.clear()
 
-        if os.path.exists(self.state_path):
-            os.remove(self.state_path)
+            with self._connect() as conn:
+                conn.execute("DELETE FROM visited_urls")
+                conn.execute("DELETE FROM pages")
+                conn.execute("DELETE FROM tokens")
+                conn.execute("DELETE FROM frontier")
 
         for name in os.listdir(self.storage_dir):
             if name.endswith(".data"):
